@@ -1,0 +1,7 @@
+{
+    "KDE_bandwidth": 15,
+    "KDE_meshpoints": 10000,
+    "dbscan_epsilon": 0.1,
+    "dbscan_minpoints": 6,
+    "dbscan_scalevec": [1,1,0]
+}

@@ -1,27 +1,36 @@
-#This script takes as input an edep-sim file and outputs a ROOT file of TMS hit instances with TMS detector effects applied. It is rather long!
+#This script takes as input an edep-sim file and outputs a ROOT file of TMS hit instances with TMS detector effects applied. This is in need of modularization at the class level at least. 
 
 #Kieran Wall - University of Virginia - August 2025
 
-#Run - 
+#Run - python3 TMSDetectorEffects.py "edep-sim-file" "output-directory" "file-number"
 
 #-------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
 #Imports
-import numpy as np
+#I apologize for using both root and uproot at different parts. Building trees is so much easier with PyROOT that I just had to.
+import uproot
 import matplotlib.pyplot as plt
+import awkward as ak
+import numpy as np
+import math
+import ROOT as root
+from array import array
+from numba import jit
+from collections import defaultdict
+import sys
+import ctypes
 from numba import njit, types
 from numba.typed import Dict, List
-import sys
-import awkward as ak
 #-------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
 #Classes
 
 #the TMS hit class - pulls directly from the edep-sim hitsegments vector. 
 
-class TMS_hit:
-    def __init__(self, tms_hit_seg, neutrino_number, hit_number, geo, spill_number):
+class TMS_Hit:
+    def __init__(self, tms_hit_seg, neutrino_number, hit_number, geo, spill_number, trackid):
         self.tms_hit_seg = tms_hit_seg
         self.neutrino_number = neutrino_number #associated with what neutrino vertex
         self.hit_number = hit_number #which TMS hit in the event
+        self.trackid = trackid
         self.spill_number = spill_number
         self.geo = geo
         self.x_diff = 0.
@@ -40,6 +49,9 @@ class TMS_hit:
 
     def GetSpillNumber(self):
         return(self.spill_number)
+
+    def GetHitTrackid(self):
+        return(self.trackid)
         
     #returns averaged x position of edep-sim hit segments within the bar    
     def GetHitTrueX(self):
@@ -378,10 +390,31 @@ def SortByBar(hit_info_array):
     return(group_dict)
 
 #This function will take our group dictionary, detsim_hit_array, and a readout window length, and sorts hits in bars into timing groups
+def SortByBar(hit_info_array):
+    N = hit_info_array.shape[0]
+
+    # Group hits by (layerno, barno)
+    group_dict = Dict.empty(
+        key_type=types.UniTuple(types.float64, 2),
+        value_type=types.ListType(types.int64)
+    )
+
+    for i in range(N):
+        layer = hit_info_array[i, 1]
+        bar = hit_info_array[i, 0]
+        key = (layer, bar)
+        if key not in group_dict:
+            group_dict[key] = List.empty_list(types.int64)
+        group_dict[key].append(i)
+        
+    return(group_dict)
+
+#This function will take our group dictionary, detsim_hit_array, and a readout window length, and sorts hits in bars into timing groups
 def CreateTimeGroups(hit_array, bar_dictionary, readout_window = 120):
     all_groups = []
     for key in bar_dictionary:
         index_list = bar_dictionary[key]
+        
         times = [hit_array[i][2] for i in index_list]
         sorted_idx = np.argsort(times) #returns indixes that would sort a list. - not matched to hits
         sorted_times = [times[i] for i in sorted_idx] #times sorted by times
@@ -414,7 +447,6 @@ def CreateTimeGroups(hit_array, bar_dictionary, readout_window = 120):
             all_groups.append(group)
             
     return(all_groups)
-
 
 # ------ Functions pertaining to creating output trees ------- #
 
@@ -472,7 +504,7 @@ def CreateUnmergedTree(detsim_hits_generator, root_output_file, file_number_):
     # Now loop to fill our branches
     for hit in detsim_hits_generator:
         if hit.GetBarNo() == 'null':
-            print("Had to skip due to a bad bar number") 
+            #print("Had to skip due to a bad bar number") 
             #these are peculiar hits - nodes connect to a layer but not a scintillator bar, ie they aren't associated with a scintillator volume. 
             #I would put money on this being an issue in dune-tms as well whether its been spotted or not.
             #just going to log as a known issue and continue onwards. 
@@ -637,6 +669,65 @@ def CreateMergedTree(Unmerged_Tree_Uproot, root_output_file, merged_index_groups
     root_file.Write()
     root_file.Close()
 
+
+#Neutrino Vertex Tree
+def CreateNeutrinoTree(vertex_array, root_output_file, file_number_, neutrino_info_array):
+    root_file = root.TFile(root_output_file, "UPDATE")
+    root_file.cd()
+    NeutrinoVertexTree = root.TTree("NeutrinoVertexTree", "Neutrino Vertices")
+
+    # The variables to be filled from a single merged hit
+    NeutrinoNumber = ctypes.c_long(0)
+    FileNumber = ctypes.c_long(0)
+    NeutrinoSpill = ctypes.c_long(0)
+    
+    NeutrinoVtxX = ctypes.c_double(0)
+    NeutrinoVtxY = ctypes.c_double(0)
+    NeutrinoVtxZ = ctypes.c_double(0)
+    NeutrinoVtxT = ctypes.c_double(0)
+
+    VisibleHits = ctypes.c_long(0)
+    VisiblePEs = ctypes.c_double(0)
+    
+    
+    # Declare the branches for MergedTree
+    NeutrinoVertexTree.Branch("NeutrinoVtxX", NeutrinoVtxX, "NeutrinoVtxX/D")
+    NeutrinoVertexTree.Branch("NeutrinoVtxY", NeutrinoVtxY, "NeutrinoVtxY/D")
+    NeutrinoVertexTree.Branch("NeutrinoVtxZ", NeutrinoVtxZ, "NeutrinoVtxZ/D")
+    NeutrinoVertexTree.Branch("NeutrinoVtxT", NeutrinoVtxT, "NeutrinoVtxT/D")
+    NeutrinoVertexTree.Branch("NeutrinoNumber", NeutrinoNumber, "NeutrinoNumber/L")
+    NeutrinoVertexTree.Branch("FileNumber", FileNumber, "FileNumber/L")
+    NeutrinoVertexTree.Branch("NeutrinoSpill", NeutrinoSpill, "NeutrinoSpill/L")
+    NeutrinoVertexTree.Branch("VisibleHits", VisibleHits, "VisibleHits/L")
+    NeutrinoVertexTree.Branch("VisiblePEs", VisiblePEs, "VisiblePEs/D")
+
+    # Loop over the merged hit index groups
+    for vtx in vertex_array:
+        
+        # vtx holds info like: (neutrino_number, neutrino_x, neutrino_y, neutrino_z, neutrino_t, neutrino_spill). 
+        NeutrinoNumber.value = int(vtx[0])
+        FileNumber.value = int(file_number_)
+        NeutrinoSpill.value = int(vtx[5])
+    
+        NeutrinoVtxX.value = vtx[1]
+        NeutrinoVtxY.value = vtx[2]
+        NeutrinoVtxZ.value = vtx[3]
+        NeutrinoVtxT.value = vtx[4]
+
+        VisibleHits.value = 0
+        VisiblePEs.value = 0
+        #Here we check whether our vertex has any hits post merging. If so update value before filling
+        
+        info_row = neutrino_info_array[neutrino_info_array[:,0] == NeutrinoNumber] #grab the info row
+        if len(info_row) != 0:
+            VisibleHits.value = int(info_row[0][1]) #fill visible merged hits
+            VisiblePEs.value = info_row[0][2] #fill visible PEs
+
+        NeutrinoVertexTree.Fill()
+    
+    root_file.Write()
+    root_file.Close()
+
 # ------ Generators ------- #
 
 #Detector effects sim generator
@@ -663,7 +754,7 @@ def main():
     #Initializing
     edep_file = root.TFile(sys.argv[1]) #grabbing the input file (ex. "/sdf/home/t/tanaka/MicroProdN4p1_NDComplex_FHC.spill.full.0002459.EDEPSIM_SPILLS.root")
     output_dir = str(sys.argv[2])
-    file_number = str(sys.argv[3]) #will be the non-zero part of the number
+    file_number = int(sys.argv[3]) #will be the non-zero part of the number
     
     
     geom = edep_file.Get("EDepSimGeometry") #fetching the geometry from the edep_file
@@ -679,29 +770,95 @@ def main():
 
     #Let's do the detector simulation
     print("About to run detector sim, this could take up to 10 minutes!")
-    detsim_hits_generator = TMS_Event_Processor(edep_evts, geom, n_events = total_events, neutrino_vtx_dict) #creates a list of all the TMS hit instances.
-    output_file_path = output_dir + 'detsim_' + file_number + '.root'
-
-    #Output tree
-    root_output = root.TFile(output_file_path, "RECREATE")
-
-    #output root file generation.
-    CreateUnmergedTree(detsim_hits_generator, root_output, 2500)
+    detsim_hits_generator = TMS_Event_Processor(edep_evts, geom, neutrino_vtx_array, n_events = total_events) #creates a list of all the TMS hit instances.
+    output_file = output_dir + 'detsim_' + str(file_number) + '.root'
+    
+    #Output tree file
+    root_output = root.TFile(output_file, "RECREATE")
+    
+    #Unmerged hits tree. 
+    CreateUnmergedTree(detsim_hits_generator, root_output, file_number)
 
     #need another generator call
-    detsim_hits_generator = TMS_Event_Processor( edep_evts, geom, neutrino_vtx_array, n_events = 10)
+    detsim_hits_generator = TMS_Event_Processor(edep_evts, geom, neutrino_vtx_array, n_events = total_events)
 
     
-    with uproot.open(file_path) as root_file:
+    with uproot.open(output_file) as root_file:
         unmerged_tree = root_file["UnmergedTree"]
         entries = unmerged_tree.num_entries
         essential_data = unmerged_tree.arrays(["DetSimHitBarNo", "DetSimHitLayerNo", "DetSimHitT", "DetSimHitPE"], library="np")
         essential_data_array = np.column_stack(list(essential_data.values())) 
 
-    hit_dict = SortByBar(essential_data_array)
-    merged_groups = CreateTimeGroups(essential_data_array, hit_dict)
+        #Perform hit merging
+        hit_dict = SortByBar(essential_data_array)
 
+        #Create Merged groups
+        merged_groups = CreateTimeGroups(essential_data_array, hit_dict)
+
+        #Create Merged Tree
+        CreateMergedTree(unmerged_tree, output_file, merged_groups, file_number)
+
+
+    #Now lets gather the stats to add to the neutrino vertex tree
+    with uproot.open(output_file) as root_file:
+        merged_tree = root_file["MergedTree"]
+        nns = merged_tree['MergedNeutrinoNumber'].array()
+        detsimPE = merged_tree['MergedDetSimHitPE'].array()
+        all_hits_array = np.column_stack([nns, detsimPE])
+        nn_info = []
+        for nn in np.unique(all_hits_array[:,0]):
+            nn_subarray = all_hits_array[all_hits_array[:,0] == nn]
+            visible_PE_sum = np.sum(nn_subarray[:,1])
+            n_hits = len(nn_subarray[:,1])
+            nn_info.append([nn, n_hits, visible_PE_sum])
+            
+        nn_info_array = np.vstack(nn_info)
+
+
+        #Create Neutrino Vertex Tree 
+        CreateNeutrinoTree(neutrino_vtx_array, output_file, file_number, nn_info_array)
     
+    
+    """
+    #validation
+    with uproot.open(output_file) as root_file:
+        # Print a list of all objects (trees, histograms, etc.) in the file
+        print("Objects in the ROOT file:", root_file.keys())
+
+        # Access a specific tree by its name
+        # Replace "UnmergedTree" with the name of your tree
+        merged_tree = root_file["MergedTree"]
+        unmerged_tree = root_file["UnmergedTree"]
+        neutrino_tree = root_file["NeutrinoVertexTree"]
+        print(merged_tree.num_entries)
+        print(unmerged_tree.num_entries)
+        print(neutrino_tree.num_entries)
+        # Print a list of branches (columns) in the tree
+        print("Branches in MergedTree:", merged_tree.keys())
+        print("Branches in NeutrinoVertexTree:", neutrino_tree.keys())
+        unmerged_times = unmerged_tree['DetSimHitT'].array()
+        spillnos_nvtx = neutrino_tree["NeutrinoSpill"].array()
+        spillnos_merged = merged_tree["MergedSpillNumber"].array()
+        times_merged = merged_tree["MergedDetSimHitT"].array()
+        print(f"Spill Numbers nvtx, {spillnos_nvtx}")
+        print(f"Times merged, {times_merged}")
+        print(f"Times unmerged, {unmerged_times}")
+        print(f"Spill Numbers merged, {spillnos_merged}")
+        
+        # You can now work with the data in the tree
+        # For example, convert a branch to a NumPy array
+        const_PEs = merged_tree["constituent_hitTs"].array()
+        #print("First 100 neutrino numbers:", const_PEs[:1])
+    """
+main()
+
+
+
+
+
+
+
+
 
 
 
