@@ -38,15 +38,6 @@ def load_config(file_path):
         print(f"An unexpected error occurred: {e}")
 
 
-#This is not properly implemented at this moment in time. 
-"""
-KDE_bandwidth = 15
-KDE_meshpoints = 10000
-dbscan_epsilon = 0.1
-dbscan_minpoints = 6
-dbscan_scalevec = [1,1,0]
-"""
-
 #-------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 
@@ -271,6 +262,25 @@ def dbscan_eval(dbscanned, neutrino_info_set):
     hit_content_mask = neutrino_info_set[:,0] != 0
     return((dbscan_metric_array[hit_content_mask], dbscan_occupancies))
 
+#Forms an array transfering our constituent hit information. One entry for each constituent hit. NO entries for core merged hits with no constituents. 
+def FormConstituentArray(merged_tree):
+    const_nns = merged_tree["constituent_neutrino_numbers"].array()
+    const_hns = merged_tree["constituent_hit_numbers"].array()
+    const_trackids = merged_tree["constituent_hit_trackids"].array()
+    constituency_array_list = []
+    for i in range(len(const_nns)):
+        merged_group_index = i
+        merged_group_nns = const_nns[i]
+        merged_group_hns = const_hns[i]
+        merged_group_trackids = const_trackids[i]
+        core_nn = merged_group_nns[0] #core is definitionally first element of the vector 
+        core_hn = merged_group_hns[0]
+        for j in range(1,len(merged_group_nns)): #loop over remaining indices, these are constituents. Only runs if more than one entry. 
+            constituency_info = [core_nn, core_hn, merged_group_nns[j], merged_group_hns[j], merged_group_trackids[j]]
+            constituency_array_list.append(constituency_info)
+            
+    constituency_array = np.vstack(constituency_array_list)
+    return(constituency_array)
 
 #Saves our clustered hits to a .npz file
 def SaveToNPZ(dbscan_clustered_hits, dbscan_epsilon, file_number_, out_dir):
@@ -310,10 +320,14 @@ def main():
     neutrino_info_set = np.column_stack( (neutrino_tree["VisibleHits"].array(), neutrino_tree["VisiblePEs"].array() ) ).to_numpy()
     dbscan_metrics, dbscan_occ = dbscan_eval(dbscanned_hits, neutrino_info_set)
     time_seg_metrics, time_seg_occ = time_segment_eval(dbscanned_hits, neutrino_info_set)
+
+    #Forming Constituents
+    print("Beginning to create constituent hit array")
+    constituent_hit_array = FormConstituentArray(merged_hits_tree)
     
     #Save
     outpath = output_directory + 'hits_clustered_' + 'epsilon_' + str(dbscan_epsilon) + '_' + str(file_number) + '.npz' 
-    np.savez(outpath, first = dbscanned_hits, second = dbscan_metrics, third = dbscan_occ, fourth = time_seg_metrics, fifth = time_seg_occ)
+    np.savez(outpath, dbscan_hits = dbscanned_hits, dbscan_metric_array = dbscan_metrics, dbscan_occupancy = dbscan_occ, timeseg_metric_array = time_seg_metrics, timeseg_occupancy = time_seg_occ, constituents_array = constituent_hit_array)
     print(f"Saved clustered hits to path {outpath}")
     
 main()
