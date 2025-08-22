@@ -200,6 +200,77 @@ def FileRunDBSCAN(hits_segmented_):
 
     return(np.vstack(labeled_segments))
 
+#how well did our time clustering do?
+def time_segment_eval(dbscanned, neutrino_info_set):
+    time_segment_metric_array = np.zeros((len(neutrino_info_set),3))
+
+    for i in range(len(neutrino_info_set)):
+        time_segment_metric_array[i][0] = i
+
+    segment_occupancies = []
+    for spill_ in (np.unique(dbscanned[:,-3])):
+        spill_hits = dbscanned[dbscanned[:,-3] == spill_]
+        for segment in np.unique(spill_hits[:,-2]):
+            segment_hits = spill_hits[spill_hits[:,-2] == segment]
+            segment_occupancies.append(len(np.unique(segment_hits[:,0])))
+            for nn in np.unique(segment_hits[:,0]): #grab all the nns in the segment
+                nn_hits = segment_hits[segment_hits[:,0] == nn]
+
+                #grab segment splits
+                seen_hits = len(nn_hits)
+                seen_PEs = np.sum(nn_hits[:,6])
+
+                #grab totals
+                nn_vis_hits = neutrino_info_set[int(nn)][0]
+                nn_vis_PEs = neutrino_info_set[int(nn)][1]
+
+                #Update containment array
+                if (time_segment_metric_array[int(nn)][1]) <= (seen_hits / nn_vis_hits) :
+                    time_segment_metric_array[int(nn)][1] = seen_hits / nn_vis_hits #hits contained
+
+                if (time_segment_metric_array[int(nn)][2]) <= (seen_PEs / nn_vis_PEs) :
+                    time_segment_metric_array[int(nn)][2] = seen_PEs / nn_vis_PEs #PEs contained
+
+    hit_content_mask = neutrino_info_set[:,0] != 0
+    time_segment_metric_array[hit_content_mask]
+    return((time_segment_metric_array[hit_content_mask], segment_occupancies))
+
+#how well did dbscan do?
+def dbscan_eval(dbscanned, neutrino_info_set):
+    dbscan_metric_array = np.zeros((len(neutrino_info_set),3))
+
+    for i in range((len(neutrino_info_set))):
+        dbscan_metric_array[i][0] = i
+
+    dbscan_occupancies = []
+    for spill_ in (np.unique(dbscanned[:,-3])):
+        spill_hits = dbscanned[dbscanned[:,-3] == spill_]
+        for segment in np.unique(spill_hits[:,-2]):
+            segment_hits = spill_hits[spill_hits[:,-2] == segment]
+            for cluster in np.unique(segment_hits[:,-1]):
+                cluster_hits = segment_hits[segment_hits[:,-1] == cluster]
+                dbscan_occupancies.append(len(np.unique(cluster_hits[:,0])))
+                for nn in np.unique(cluster_hits[:,0]): #grab all the nns in the cluster
+                    nn_hits = cluster_hits[cluster_hits[:,0] == nn]
+
+                    #grab segment splits
+                    seen_hits = len(nn_hits)
+                    seen_PEs = np.sum(nn_hits[:,6])
+
+                    #grab totals
+                    nn_vis_hits = neutrino_info_set[int(nn)][0]
+                    nn_vis_PEs = neutrino_info_set[int(nn)][1]
+
+                    #Update containment array
+                    if (dbscan_metric_array[int(nn)][1]) <= (seen_hits / nn_vis_hits) :
+                        dbscan_metric_array[int(nn)][1] = seen_hits / nn_vis_hits #hits contained
+
+                    if (dbscan_metric_array[int(nn)][2]) <= (seen_PEs / nn_vis_PEs) :
+                        dbscan_metric_array[int(nn)][2] = seen_PEs / nn_vis_PEs #PEs contained
+
+    hit_content_mask = neutrino_info_set[:,0] != 0
+    return((dbscan_metric_array[hit_content_mask], dbscan_occupancies))
+
 
 #Saves our clustered hits to a .npz file
 def SaveToNPZ(dbscan_clustered_hits, dbscan_epsilon, file_number_, out_dir):
@@ -220,6 +291,7 @@ def main():
     output_directory = sys.argv[2]
     file_number = sys.argv[3]
     merged_hits_tree = detsim_file["MergedTree"]
+    neutrino_tree = detsim_file["NeutrinoVertexTree"]
 
     #Extract our root info into an array and sort by time. 
     time_sorted_hits_ = BuildInputArray(merged_hits_tree)
@@ -233,10 +305,16 @@ def main():
     dbscanned_hits = FileRunDBSCAN(time_segmented_hits) 
     print("Completed DBSCAN Segmentation")
 
+    #Eval
+    print("Beginning Eval")
+    neutrino_info_set = np.column_stack( (neutrino_tree["VisibleHits"].array(), neutrino_tree["VisiblePEs"].array() ) ).to_numpy()
+    dbscan_metrics, dbscan_occ = dbscan_eval(dbscanned_hits, neutrino_info_set)
+    time_seg_metrics, time_seg_occ = time_segment_eval(dbscanned_hits, neutrino_info_set)
+    
     #Save
-    output_path = SaveToNPZ(dbscanned_hits, dbscan_epsilon, file_number, output_directory)
-    print(f"Saved to {output_path}")
-
+    outpath = output_directory + 'hits_clustered_' + 'epsilon_' + str(dbscan_epsilon) + '_' + str(file_number) + '.npz' 
+    np.savez(outpath, first = dbscanned_hits, second = dbscan_metrics, third = dbscan_occ, fourth = time_seg_metrics, fifth = time_seg_occ)
+    print(f"Saved clustered hits to path {outpath}")
     
 main()
     
